@@ -1,0 +1,32 @@
+name: Actualizar datos INE mensualmente
+
+on:
+  # Corre el día 28 de cada mes a las 10:00 UTC (la EOH sale entre el 20-28)
+  schedule:
+    - cron: "0 10 28 * *"
+  # También permite ejecutarlo manualmente desde la UI de GitHub
+  workflow_dispatch:
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install requests firebase-admin python-dateutil
+
+      - name: Ejecutar ingestión INE → Firebase
+        env:
+          FIREBASE_CREDENTIALS: ${{ secrets.FIREBASE_CREDENTIALS }}
+        run: python scripts/ingest_ine.py
+
+      - name: Notificar si falla
+        if: failure()
+        run: echo "::error::La ingestión de datos INE ha fallado. Revisa los logs."
