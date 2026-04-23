@@ -1,18 +1,14 @@
 """
 ingest_ine.py — Descarga datos EOH del INE y los sube a Firebase Firestore
-Corre en GitHub Actions cada mes. También se puede ejecutar en local.
-
-Requisitos:
-  pip install requests firebase-admin
+Corre en GitHub Actions cada mes (día 28) o manualmente.
 
 Variables de entorno necesarias:
-  FIREBASE_PROJECT_ID   → ID de tu proyecto Firebase
-  FIREBASE_CREDENTIALS  → JSON de credenciales de cuenta de servicio (string)
+  FIREBASE_CREDENTIALS → JSON de credenciales de cuenta de servicio (string)
+
+Nota: Actualizar ADR_MANUAL cada mes con el dato de la nota de prensa del INE.
 """
 
-import os
-import json
-import requests
+import os, json, requests
 from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -21,134 +17,138 @@ from firebase_admin import credentials, firestore
 cred_json = os.environ.get("FIREBASE_CREDENTIALS", "")
 if cred_json:
     cred = credentials.Certificate(json.loads(cred_json))
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app(cred, {'projectId': 'barometro-hotelero'})
 else:
-    # En local: usa el archivo de credenciales directamente
-    cred = credentials.Certificate("firebase-credentials.json")
-
-if not firebase_admin._apps:
-    firebase_admin.initialize_app(cred)
+    if not firebase_admin._apps:
+        cred = credentials.Certificate("firebase-credentials.json")
+        firebase_admin.initialize_app(cred, {'projectId': 'barometro-hotelero'})
 
 db = firestore.client()
+print("Firebase conectado")
+
+# ── Constantes ────────────────────────────────────────────────────────────────
+MESES_LARGOS = ["Enero","Febrero","Marzo","Abril","Mayo","Junio",
+                "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
+MESES_CORTOS = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"]
+
+CCAAS = {
+    "Andalucía":          "Andalucía",
+    "Aragón":             "Aragón",
+    "Asturias":           "Asturias (Principado de)",
+    "Baleares":           "Baleares (Illes)",
+    "Canarias":           "Canarias",
+    "Cantabria":          "Cantabria",
+    "Castilla y León":    "Castilla y León",
+    "Castilla-La Mancha": "Castilla - La Mancha",
+    "Cataluña":           "Cataluña",
+    "C. Valenciana":      "Comunitat Valenciana",
+    "Extremadura":        "Extremadura",
+    "Galicia":            "Galicia",
+    "La Rioja":           "Rioja (La)",
+    "Madrid":             "Madrid (Comunidad de)",
+    "Murcia":             "Murcia (Región de)",
+    "Navarra":            "Navarra (Comunidad Foral de)",
+    "País Vasco":         "País Vasco",
+}
+
+# ── ADR manual — actualizar cada mes con nota de prensa INE ──────────────────
+# Marzo 2026: "Los hoteles facturaron 116.3 euros de media por habitación ocupada"
+ADR_MANUAL = 116.3
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-def get_ine(tabla_id: int, n_ultimos: int = 13) -> list:
-    url = f"https://servicios.ine.es/wstempus/js/es/DATOS_TABLA/{tabla_id}?tip=AM&nult={n_ultimos}"
+def get_ine(tabla_id, n=24):
+    url = f"https://servicios.ine.es/wstempus/js/es/DATOS_TABLA/{tabla_id}?tip=AM&nult={n}"
     r = requests.get(url, timeout=30)
     r.raise_for_status()
     return r.json()
 
-def extraer_valor(series: list, contiene: str, periodo: str) -> float | None:
+def buscar_valor(series, nombre_exacto, anyo, mes_num):
+    mes_str = f"M{str(mes_num).zfill(2)}"
     for s in series:
-        if contiene.lower() in s.get("Nombre", "").lower():
-            for d in s.get("Data", []):
-                if d.get("NombrePeriodo") == periodo:
+        if s.get("Nombre","").strip() == nombre_exacto.strip():
+            for d in s.get("Data",[]):
+                if d["Anyo"] == anyo and d["T3_Periodo"] == mes_str:
+                    return d.get("Valor")
+    return None
+
+def buscar_contiene(series, fragmento, anyo, mes_num):
+    mes_str = f"M{str(mes_num).zfill(2)}"
+    for s in series:
+        if fragmento.lower() in s.get("Nombre","").lower():
+            for d in s.get("Data",[]):
+                if d["Anyo"] == anyo and d["T3_Periodo"] == mes_str:
                     return d.get("Valor")
     return None
 
 # ── Descarga ──────────────────────────────────────────────────────────────────
-print("Descargando EOH — Viajeros y pernoctaciones por CCAA (tabla 2074)...")
-viajeros_raw = get_ine(2074, 24)
+print("Descargando datos INE...")
+viajeros  = get_ine(2074, 24)
+ocup_data = get_ine(2066, 3)
+iph_data  = get_ine(12157, 3)
+print("Datos descargados")
 
-print("Descargando IPH — Índice de precios hoteleros (tabla 2070)...")
-iph_raw = get_ine(2070, 3)
-
-print("Descargando IRSH — RevPAR y ADR (tabla 2942)...")
-irsh_raw = get_ine(2942, 3)
-
-print("Descargando EOH — Ocupación por habitaciones (tabla 2066)...")
-ocup_raw = get_ine(2066, 3)
-
-# ── Periodo más reciente disponible ──────────────────────────────────────────
-ultimo_periodo = viajeros_raw[0]["Data"][0]["NombrePeriodo"]
-print(f"Último periodo disponible: {ultimo_periodo}")
+# ── Periodo más reciente ──────────────────────────────────────────────────────
+d0 = viajeros[0]["Data"][0]
+ultimo_anyo = d0["Anyo"]
+ultimo_mes  = int(d0["T3_Periodo"].replace("M",""))
+ultimo_label = f"{MESES_LARGOS[ultimo_mes-1]} {ultimo_anyo}"
+print(f"Último periodo: {ultimo_label}")
 
 # ── KPIs nacionales ───────────────────────────────────────────────────────────
-total_pernoctaciones = extraer_valor(
-    viajeros_raw, "Pernoctaciones. Total Nacional. Total viajeros", ultimo_periodo
-)
-revpar = extraer_valor(irsh_raw, "RevPAR. Nacional", ultimo_periodo)
-adr    = extraer_valor(irsh_raw, "ADR. Nacional", ultimo_periodo)
-ocup   = extraer_valor(ocup_raw, "Grado de ocupación por habitaciones. Nacional", ultimo_periodo)
-iph    = extraer_valor(iph_raw,  "Índice de precios hoteleros. Nacional. Variación anual", ultimo_periodo)
-
-# Variación anual pernoctaciones (comparamos con mismo mes año anterior)
-meses_data = [d for s in viajeros_raw if "Pernoctaciones. Total Nacional. Total viajeros" in s.get("Nombre","")
-              for d in s.get("Data", [])]
-val_actual = next((d["Valor"] for d in meses_data if d["NombrePeriodo"] == ultimo_periodo), None)
-# Periodo -12 meses
-from dateutil.relativedelta import relativedelta
-dt = datetime.strptime(ultimo_periodo, "%B %Y")
-dt_ant = dt - relativedelta(months=12)
-periodo_ant = dt_ant.strftime("%-B %Y")  # Linux; en Windows usar %#B
-val_anterior = next((d["Valor"] for d in meses_data if d["NombrePeriodo"] == periodo_ant), None)
-variacion_anual = ((val_actual - val_anterior) / val_anterior * 100) if val_actual and val_anterior else None
+total_pernoc = buscar_valor(viajeros,
+    "Nacional. Pernoctaciones. Total categorías. Total.", ultimo_anyo, ultimo_mes)
+ocup_val = buscar_valor(ocup_data,
+    "Nacional. Grado de ocupación por habitaciones.", ultimo_anyo, ultimo_mes)
+iph_val = buscar_contiene(iph_data,
+    "Nacional. Tasa de variación interanual", ultimo_anyo, ultimo_mes)
+val_ant = buscar_valor(viajeros,
+    "Nacional. Pernoctaciones. Total categorías. Total.", ultimo_anyo-1, ultimo_mes)
+var_anual = round((total_pernoc-val_ant)/val_ant*100, 2) if total_pernoc and val_ant else 0
+revpar_val = round(ADR_MANUAL * ((ocup_val or 0)/100), 1) if ocup_val else 0
 
 # ── Datos por CCAA ────────────────────────────────────────────────────────────
-CCAAS = [
-    "Andalucía", "Aragón", "Asturias", "Baleares", "Canarias", "Cantabria",
-    "Castilla y León", "Castilla-La Mancha", "Cataluña", "Comunitat Valenciana",
-    "Extremadura", "Galicia", "La Rioja", "Madrid", "Murcia", "Navarra", "País Vasco",
-]
-
 por_ccaa = []
-for ccaa in CCAAS:
-    pernoc = extraer_valor(viajeros_raw, f"Pernoctaciones. {ccaa}. Total", ultimo_periodo)
-    viaj   = extraer_valor(viajeros_raw, f"Viajeros. {ccaa}. Total", ultimo_periodo)
-    occ    = extraer_valor(ocup_raw, f"Grado de ocupación. {ccaa}", ultimo_periodo)
-    if pernoc:
-        por_ccaa.append({
-            "ccaa": ccaa,
-            "pernoctaciones": pernoc,
-            "viajeros": viaj or 0,
-            "variacion_anual": 0,  # TODO: calcular igual que nacional
-            "ocupacion": occ or 0,
-        })
+for nombre_display, nombre_ine in CCAAS.items():
+    p = buscar_valor(viajeros, f"{nombre_ine}. Pernoctaciones. Total.", ultimo_anyo, ultimo_mes)
+    v = buscar_valor(viajeros, f"{nombre_ine}. Viajeros. Total.", ultimo_anyo, ultimo_mes)
+    o = buscar_contiene(ocup_data, f"{nombre_ine}. Grado de ocupación por habitaciones", ultimo_anyo, ultimo_mes)
+    p_ant = buscar_valor(viajeros, f"{nombre_ine}. Pernoctaciones. Total.", ultimo_anyo-1, ultimo_mes)
+    var = round((p-p_ant)/p_ant*100, 2) if p and p_ant else 0
+    if p:
+        por_ccaa.append({"ccaa": nombre_display, "pernoctaciones": p,
+                         "viajeros": v or 0, "variacion_anual": var, "ocupacion": o or 0})
 
-# ── Serie mensual (últimos 13 meses) ─────────────────────────────────────────
-MESES_ES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio",
-            "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
-MESES_CORTOS = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"]
-
-serie_nacional = next(
-    (s for s in viajeros_raw if "Pernoctaciones. Total Nacional. Total viajeros" in s.get("Nombre","")), None
-)
+# ── Serie mensual ─────────────────────────────────────────────────────────────
+serie_nac = next((s for s in viajeros
+    if s.get("Nombre","").strip() == "Nacional. Pernoctaciones. Total categorías. Total."), None)
 mensual = []
-if serie_nacional:
-    for d in reversed(serie_nacional["Data"]):
-        try:
-            nombre = d["NombrePeriodo"]  # ej "Enero 2025"
-            partes = nombre.split()
-            m_idx = MESES_ES.index(partes[0])
-            anyo = partes[1]
-            mes_key = f"{anyo}-{str(m_idx+1).zfill(2)}"
-            mensual.append({
-                "mes": mes_key,
-                "label": MESES_CORTOS[m_idx],
-                "pernoctaciones": d["Valor"],
-                "viajeros": 0,  # añadir si se necesita
-            })
-        except Exception:
-            continue
+if serie_nac:
+    for d in reversed(serie_nac["Data"]):
+        mes_n = int(d["T3_Periodo"].replace("M",""))
+        mensual.append({"mes": f"{d['Anyo']}-{str(mes_n).zfill(2)}",
+                        "label": MESES_CORTOS[mes_n-1],
+                        "pernoctaciones": d.get("Valor") or 0, "viajeros": 0})
 
-# ── Snapshot final ────────────────────────────────────────────────────────────
+# ── Subir a Firestore ─────────────────────────────────────────────────────────
 snapshot = {
-    "periodo": ultimo_periodo,
+    "periodo": ultimo_label,
     "actualizado": datetime.now().strftime("%Y-%m-%d"),
     "kpis": {
-        "total_pernoctaciones": total_pernoctaciones or 0,
-        "variacion_anual": round(variacion_anual, 2) if variacion_anual else 0,
-        "revpar": revpar or 0,
-        "adr": adr or 0,
-        "ocupacion": ocup or 0,
-        "iph": iph or 0,
-        "periodo": ultimo_periodo,
+        "total_pernoctaciones": total_pernoc or 0,
+        "variacion_anual": var_anual,
+        "revpar": revpar_val,
+        "adr": ADR_MANUAL,
+        "ocupacion": ocup_val or 0,
+        "iph": iph_val or 0,
+        "periodo": ultimo_label,
     },
     "por_ccaa": por_ccaa,
     "mensual": mensual,
 }
 
-# ── Subir a Firestore ─────────────────────────────────────────────────────────
-doc_id = ultimo_periodo.replace(" ", "_")
+doc_id = ultimo_label.replace(" ","_")
 db.collection("eoh").document(doc_id).set(snapshot)
-print(f"✅ Subido a Firebase: eoh/{doc_id}")
-print(f"   KPIs: {json.dumps(snapshot['kpis'], ensure_ascii=False, indent=2)}")
+print(f"Subido a Firebase: eoh/{doc_id}")
+print(f"CCAAs: {len(por_ccaa)} | Meses: {len(mensual)}")
+print(json.dumps(snapshot["kpis"], ensure_ascii=False, indent=2))
