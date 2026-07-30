@@ -45,7 +45,7 @@ const DEMO_DATA = {
 
 export async function GET() {
   try {
-    const q = query(collection(db, "eoh"), orderBy("periodo", "desc"), limit(1));
+    const q = query(collection(db, "eoh"), orderBy("periodo_key", "desc"), limit(1));
     const snap = await getDocs(q);
     if (!snap.empty) {
       return NextResponse.json(snap.docs[0].data());

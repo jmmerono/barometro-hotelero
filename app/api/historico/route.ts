@@ -15,7 +15,7 @@ export async function GET(req: Request) {
   }
 
   // Devolver histórico completo
-  const q = query(collection(db, "eoh"), orderBy("periodo", "desc"));
+  const q = query(collection(db, "eoh"), orderBy("periodo_key", "desc"));
   const docs = await getDocs(q);
   const historico = docs.docs.map(d => d.data());
 

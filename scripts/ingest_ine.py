@@ -133,6 +133,7 @@ if serie_nac:
 # ── Subir a Firestore ─────────────────────────────────────────────────────────
 snapshot = {
     "periodo": ultimo_label,
+    "periodo_key": f"{ultimo_anyo}-{str(ultimo_mes).zfill(2)}",
     "actualizado": datetime.now().strftime("%Y-%m-%d"),
     "kpis": {
         "total_pernoctaciones": total_pernoc or 0,
