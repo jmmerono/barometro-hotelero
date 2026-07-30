@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import Stripe from "stripe";
-import { db } from "@/lib/firebase";
-import { doc, setDoc } from "firebase/firestore";
+import { getAdminDb } from "@/lib/firebase-admin";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
   apiVersion: "2026-03-25.dahlia",
@@ -18,30 +17,37 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Webhook signature invalid" }, { status: 400 });
   }
 
-  if (event.type === "checkout.session.completed") {
-    const session = event.data.object as Stripe.Checkout.Session;
-    const email = session.customer_email;
-    const customerId = session.customer as string;
+  try {
+    const adminDb = getAdminDb();
 
-    if (email) {
-      await setDoc(doc(db, "premium_users", email), {
-        email,
-        customerId,
-        subscriptionId: session.subscription,
-        activatedAt: new Date().toISOString(),
-        active: true,
-      });
-    }
-  }
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object as Stripe.Checkout.Session;
+      const email = session.customer_email;
+      const customerId = session.customer as string;
 
-  if (event.type === "customer.subscription.deleted") {
-    const sub = event.data.object as Stripe.Subscription;
-    const customer = await stripe.customers.retrieve(sub.customer as string) as Stripe.Customer;
-    if (customer.email) {
-      await setDoc(doc(db, "premium_users", customer.email), {
-        active: false,
-      }, { merge: true });
+      if (email) {
+        await adminDb.collection("premium_users").doc(email).set({
+          email,
+          customerId,
+          subscriptionId: session.subscription,
+          activatedAt: new Date().toISOString(),
+          active: true,
+        });
+      }
     }
+
+    if (event.type === "customer.subscription.deleted") {
+      const sub = event.data.object as Stripe.Subscription;
+      const customer = await stripe.customers.retrieve(sub.customer as string) as Stripe.Customer;
+      if (customer.email) {
+        await adminDb.collection("premium_users").doc(customer.email).set({
+          active: false,
+        }, { merge: true });
+      }
+    }
+  } catch (error) {
+    console.error("Firestore error in webhook:", error);
+    return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
 
   return NextResponse.json({ received: true });

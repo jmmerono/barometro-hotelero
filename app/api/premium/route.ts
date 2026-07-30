@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { db } from "@/lib/firebase";
-import { doc, getDoc } from "firebase/firestore";
+import { getAdminDb } from "@/lib/firebase-admin";
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
@@ -8,10 +7,14 @@ export async function GET(req: Request) {
 
   if (!email) return NextResponse.json({ premium: false });
 
-  const snap = await getDoc(doc(db, "premium_users", email));
-  if (snap.exists() && snap.data().active) {
-    return NextResponse.json({ premium: true });
+  try {
+    const snap = await getAdminDb().collection("premium_users").doc(email).get();
+    if (snap.exists && snap.data()?.active) {
+      return NextResponse.json({ premium: true });
+    }
+    return NextResponse.json({ premium: false });
+  } catch (error) {
+    console.error("Firestore error:", error);
+    return NextResponse.json({ premium: false });
   }
-
-  return NextResponse.json({ premium: false });
 }
